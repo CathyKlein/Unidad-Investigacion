@@ -1,0 +1,490 @@
+---
+title: "Limpieza de datos de cada año para posterior integración"
+format: html
+editor: visual
+---
+
+```{r}
+library(dplyr)
+library(arrow)
+library(purrr)
+library(stringr)
+library(janitor)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+
+.anio = 2019
+
+# Data loading, removing variables that will not be used and exploring.
+# data <- arrow::read_parquet("00_data/GRD_PUBLICO_2019.parquet")
+data <- arrow::read_parquet(paste0("00_data/GRD_PUBLICO_", .anio, ".parquet"))
+
+```
+
+## Exploracion de tipos de variables.
+
+```{r}
+data %>%  names()
+data %>%  glimpse()
+
+```
+
+## Limpieza y conversión de variables
+```{r}
+# Remove the variables that will not be used in this data set
+variables_to_clean <- c(
+  "TIPO_PROCEDENCIA",
+  "CONDICIONDEALTANEONATO1", "PESORN1", "SEXORN1", "RN1ESTADO",
+  "CONDICIONDEALTANEONATO2", "PESORN2", "SEXORN2", "RN2ESTADO",
+  "CONDICIONDEALTANEONATO3", "PESORN3", "SEXORN3", "RN3ESTADO",
+  "CONDICIONDEALTANEONATO4", "PESORN4", "SEXORN4", "RN4ESTADO",
+  "MEDICOALTA_ENCRIPTADO", "USOSPABELLON", "TIPO_INGRESO",
+  "FECHAPROCEDIMIENTO1", "FECHAINTERV1", "MEDICOINTERV1_ENCRIPTADO",
+  "ESPECIALIDADINTERVENCION", "HOSPPROCEDENCIA", "TIPO_ACTIVIDAD",
+  "ESPECIALIDAD_MEDICA", "IR_29301_COD_GRD", "IR_29301_PESO","IR_29301_SEVERIDAD",
+  "IR_29301_MORTALIDAD"
+)
+
+data_clean <- data %>% 
+  select(-any_of(variables_to_clean))
+
+# View new df
+# data_clean %>%  names()
+
+# Standardizing variable names
+data_clean <- data_clean %>%
+  clean_names() 
+
+# Checking variable types
+# str(data_clean)
+
+data_clean <- data_clean %>%
+  mutate(across(c(fecha_nacimiento, fechaalta, fecha_ingreso, fechatraslado1, fechatraslado2, fechatraslado3, fechatraslado4, fechatraslado5, fechatraslado6, fechatraslado7, fechatraslado8, fechatraslado9), as.Date))
+
+data_clean <- data_clean %>%
+  mutate(across(starts_with("procedimiento"), as.character))
+```
+
+# Conteo de pacientes y conteo de eventos por cada año. Se define df data_clean
+```{r}
+# How many events, how many patients
+nrow(data_clean) # 1,151.475
+n_distinct(data_clean$cip_encriptado) #876,184 patients
+
+# How many patients had multiple hospitalizations
+data_clean %>%
+  count(cip_encriptado) %>%
+  filter(n > 1) %>%
+  nrow() #165,146 patients with more than one hospitalization registered in 2019
+```
+
+## Se define data set data_pacientes (unidad analisis paciente) y data_eventos (unidad de analisis hospitalizaciones)
+```{r}
+# df named data_eventos to analyze hospitalization days (dias_cama)
+data_eventos <- data_clean 
+
+# Create the variable age based on the date of the most recent hospital admission.
+# data frame is filtered for people older or equal than 15 years old
+data_pacientes <- data_clean %>%
+  group_by(cip_encriptado) %>%
+  slice_max(fecha_ingreso, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(edad = as.numeric((fecha_ingreso - fecha_nacimiento) / 365.25)) |> 
+  filter(edad >= 15)
+
+
+rm(data_clean)
+```
+## Creación de nuevas variables filtrando data_pacientes por edad, considerando mayores o iguales a 15 años de edad . 
+
+```{r variables}
+# Filter data by age groups (<15 years was considered as the difference between unique cip_encriptado in data_pacientes)
+data_pacientes <- data_pacientes %>%
+  mutate(grupo_edad = case_when(
+    edad < 45 ~ "15-44 años",
+    edad < 65 ~ "45-64 años",
+    TRUE      ~ "≥65 años"
+  ))
+
+# Create new variable nacionalidad (grouping all but chilean as variable "others")
+data_pacientes <- data_pacientes %>%
+  mutate(nacionalidad_dico = case_when(
+    nacionalidad == "CHILE" ~ "CHILE",
+    TRUE ~ "OTROS"
+  ))
+
+# Create new variable tipoalta (discharge) highlighting FALLECIDO as diseased
+data_pacientes <- data_pacientes %>%
+  mutate(tipoalta_grupo = case_when(
+    tipoalta == "FALLECIDO" ~ "FALLECIDO",
+    tipoalta %in% c("DESCONOCIDO", "NO IDENTIFICADA") ~ "DESCONOCIDO",
+    TRUE ~ "OTROS"
+  ))
+
+data_pacientes %>%
+  group_by(tipoalta_grupo) %>%
+  summarise(
+    Frecuencia = n(),
+    Porcentaje = round(n() / nrow(data_pacientes) * 100, 2)
+  )
+
+# Variable PREVISION (health_insurance)
+# Grouping insurance types into 4 categories: FONASA, PRIVADO, FF.AA, DESCONOCIDO
+data_pacientes <- data_pacientes %>%
+  mutate(
+    prevision_grupo = case_when(
+      prevision %in% c(
+        "FONASA INSTITUCIONAL - (MAI) A",
+        "FONASA INSTITUCIONAL - (MAI) B",
+        "FONASA INSTITUCIONAL - (MAI) C",
+        "FONASA INSTITUCIONAL - (MAI) D",
+        "FONASA LIBRE ELECCIÓN (FMLE_B)",
+        "FONASA LIBRE ELECCIÓN (FMLE_C)",
+        "FONASA LIBRE ELECCIÓN (FMLE_D)"
+      ) ~ "FONASA",
+      
+      prevision %in% c(
+        "ISAPRE",
+        "PARTICULAR"
+      ) ~ "PRIVADO",
+      
+      prevision %in% c(
+        "DIPRECA",
+        "CAPREDENA",
+        "CAJA DE PREVISIÓN FFAA (SISA)"
+      ) ~ "FF.AA",
+      
+      prevision %in% c(
+        "NO IDENTIFICADA",
+        "NO CONSIGNADO",
+        "DESCONOCIDO"
+      ) ~ "DESCONOCIDO",
+      
+      TRUE ~ NA_character_
+    )
+  ) 
+
+
+# Remove variables from which new ones were created
+data_pacientes <- data_pacientes %>%
+  select(-nacionalidad, -prevision, -tipoalta)
+```
+
+## Aplicación de df Censo proyectado para calcular la población regional de cada año y poder calcular tasas de uso UPC posteriormente. 
+
+```{r}
+# Define regions
+censo <- readr::read_csv2("00_data/censo_proyecciones_año.csv")
+
+censo2 <- censo %>%  
+  select(-1) %>%  
+  # filter(año == 2019) %>%  
+  filter(año == .anio) %>%
+  mutate(comuna_match = toupper(comuna))
+
+censo2 <- censo2 %>%  
+  clean_names() %>%  
+  group_by(region) %>%  
+  mutate(poblacion_region = sum(poblacion))
+
+data_pacientes <- data_pacientes %>% 
+  # distinct(comuna) %>%  
+  mutate(comuna_match = case_match(comuna,
+                                   "CURICO" ~ "CURICÓ",
+                                   "MAIPU" ~ "MAIPÚ",
+                                   "TOME" ~ "TOMÉ",
+                                   "VALPARAISO" ~ "VALPARAÍSO",
+                                   "QUILPUE" ~ "QUILPUÉ",
+                                   "CHILLAN" ~ "CHILLÁN",
+                                   "COPIAPO" ~ "COPIAPÓ",
+                                   "COIHAIQUE" ~ "COYHAIQUE",
+                                   "LOS ÁNGELES" ~ "LOS ANGELES",
+                                   "SANTA MARIA" ~ "SANTA MARÍA",
+                                   "CON CON" ~ "CONCÓN",
+                                   "CHEPICA" ~ "CHÉPICA",
+                                   "MARIA PINTO" ~ "MARÍA PINTO",
+                                   "AISÉN" ~ "AYSÉN",
+                                   "DESCONOCIDO" ~ "DESCONOCIDO",
+                                   "CHILLAN VIEJO" ~ "CHILLÁN VIEJO",
+                                   "PITRUFQUÉN" ~ "PITRUFQUEN",
+                                   "O\"HIGGINS" ~ "O'HIGGINS",
+                                   "MARIA ELENA" ~ "MARÍA ELENA",
+                                   .default = comuna)) |>
+  select(-comuna, -any_of("region"), -any_of("provincia")) %>% 
+  left_join(censo2, by = "comuna_match") %>%  
+  select(-comuna_match)
+
+
+
+data_pacientes %>% 
+  glimpse()
+
+
+# data_pacientes %>%  
+#   group_by(region) %>%  
+#   mutate(poblacion_region = sum(poblacion))
+
+```
+
+# Creación de variables asociadas a unidad de paciente crítico
+```{r}
+# CPU (critical patient unit) distribution
+upc_units <- c(
+  # Critical Care Units (UCI)
+  "UNIDAD DE CUIDADOS INTENSIVOS (UCI) (INDIFERENCIADO)",
+  "UNIDAD DE CUIDADOS INTENSIVOS ADULTO",
+  "UNIDAD DE CUIDADOS INTENSIVOS CARDIOLOGÍA",
+  "UNIDAD DE CUIDADOS INTENSIVOS CARDIVASCULAR",
+  "UNIDAD DE CUIDADOS INTENSIVOS QUEMADOS",
+  
+  # Intermediate Care Units (UTI)
+  "UNIDAD DE TRATAMIENTO INTERMEDIO (UTI) (INDIFERENCIADO) ADULTO",
+  "UNIDAD DE TRATAMIENTO INTERMEDIO CORONARIO",
+  "UNIDAD DE TRATAMIENTO INTERMEDIO MEDICINA ADULTO",
+  "UNIDAD DE TRATAMIENTO INTERMEDIO CARDIOVASCULAR",
+  "UNIDAD DE TRATAMIENTO INTERMEDIO CIRUGÍA ADULTO",
+  "UNIDAD DE TRATAMIENTO INTERMEDIO NEUROQUIRÚRGICO",
+  "UNIDAD DE TRATAMIENTO INTERMEDIO QUEMADOS",
+  "UNIDAD DE TRATAMIENTO INTERMEDIO NEUROLOGIA"
+)
+
+# Check whether a patient either entered the hospital through a UPC unit or was admitted to one at any point during transfers (traslados1 to traslados9).
+
+data_pacientes <- data_pacientes %>%
+  mutate(
+    upc = if_else(
+      servicioingreso %in% upc_units |
+        serviciotraslado1 %in% upc_units |
+        serviciotraslado2 %in% upc_units |
+        serviciotraslado3 %in% upc_units |
+        serviciotraslado4 %in% upc_units |
+        serviciotraslado5 %in% upc_units |
+        serviciotraslado6 %in% upc_units |
+        serviciotraslado7 %in% upc_units |
+        serviciotraslado8 %in% upc_units |
+        serviciotraslado9 %in% upc_units,
+      TRUE,
+      FALSE
+    )
+  )
+
+data_pacientes %>%
+  count(upc)
+```
+
+## Creación de variables asociadas a diagnóstico de cancer
+```{r}
+# Cancer diagnosis: Patients are classified as having cancer or not based on whether any of the diagnostico1 to diagnostico35 fields match an ICD-10 cancer code.
+
+# Distribution based on type of cancer
+cancer_icd10_groups <- tibble::tibble(
+  codigo = c(
+    # Lip, oral cavity and pharynx
+    "C00", "C01", "C02", "C03", "C04", "C05", "C06", "C07", "C08", "C09", "C10", "C11", "C12", "C13", "C14",
+    
+    # Digestive organs
+    "C15", "C16", "C17", "C18", "C19", "C20", "C21", "C22", "C23", "C24", "C25", "C26",
+    
+    # Respiratory and intrathoracic organs
+    "C30", "C31", "C32", "C33", "C34", "C35", "C36", "C37", "C38", "C39",
+    
+    # Bone and cartilage
+    "C40", "C41",
+    
+    # Skin
+    "C43", "C44",
+    
+    # Mesothelial and soft tissues
+    "C45", "C46", "C47", "C48", "C49",
+    
+    # Breast
+    "C50",
+    
+    # Female genital organs
+    "C51", "C52", "C53", "C54", "C55", "C56", "C57", "C58",
+    
+    # Male genital organs
+    "C60", "C61", "C62", "C63",
+    
+    # Urinary tract
+    "C64", "C65", "C66", "C67", "C68",
+    
+    # Eye, brain and CNS
+    "C69", "C70", "C71", "C72",
+    
+    # Endocrine glands
+    "C73", "C74", "C75",
+    
+    # Ill-defined, secondary, and unspecified sites
+    "C76", "C77", "C78", "C79", "C80",
+    
+    # Lymphatic and hematopoietic tissue
+    "C81", "C82", "C83", "C84", "C85", "C86", "C87", "C88", "C89", "C90", "C91", "C92", "C93", "C94", "C95", "C96",
+    
+    # Multiple independent sites
+    "C97",
+    
+    # Tumors in situ
+    "D01", "D02", "D03", "D04", "D05", "D06", "D07", "D08", "D09",
+    
+    # Tumors of uncertain or unknown behavior
+    "D37", "D38", "D39", "D40", "D41", "D42", "D43", "D44", "D45", "D46", "D47", "D48"
+  ),
+  cancer_group = c(
+    rep("Lip, oral cavity and pharynx", 15),
+    rep("Digestive organs", 12),
+    rep("Respiratory and intrathoracic organs", 10),
+    rep("Bone and cartilage", 2),
+    rep("Skin", 2),
+    rep("Mesothelial and soft tissues", 5),
+    rep("Breast", 1),
+    rep("Female genital organs", 8),
+    rep("Male genital organs", 4),
+    rep("Urinary tract", 5),
+    rep("Eye, brain and CNS", 4),
+    rep("Endocrine glands", 3),
+    rep("Ill-defined/secondary/unspecified", 5),
+    rep("Lymphatic and hematopoietic", 16),
+    rep("Multiple primary tumors", 1),
+    rep("Tumors in situ", 9),
+    rep("Tumors uncertain behavior", 12)
+  )
+)
+
+data_pacientes <- data_pacientes %>%
+  mutate(
+    diagnostico_cancer = case_when(
+      if_any(starts_with("diagnostico"), 
+             ~ str_sub(., 1, 3) %in% cancer_icd10_groups$codigo) ~ "oncologico",
+      TRUE ~ "no_oncologico"
+    )
+  )
+
+```
+
+## Creación de variable que discrimina cancer solido, no solido removiendo diagnósticos inespecíficos.
+```{r}
+# Creating new cancer related variables 
+#ICD10 code groups (from earlier) creating variable tumor_dico
+codigo_no_solido <- c("C81", "C82", "C83", "C84", "C85", "C86", "C87", "C88", "C89", "C90", "C91", "C92", "C93", "C94", "C95", "C96")
+codigo_inespecifico <- c("C76", "C77", "C78", "C79", "C80", "D37", "D38", "D39", "D40", "D41", "D42", "D43", "D44", "D45", "D46", "D47", "D48")
+
+
+data_pacientes <- data_pacientes %>%
+  mutate(tumor_tipo = case_when(
+    diagnostico_cancer == "no_oncologico" ~ NA_character_,
+    if_any(starts_with("diagnostico"), ~ str_sub(., 1, 3) %in% codigo_no_solido) ~ "no sólido",
+    diagnostico_cancer == "oncologico" ~ "sólido",
+    if_any(starts_with("diagnostico"), ~ str_sub(., 1, 3) %in% codigo_inespecifico) ~ "inespecífico",
+    TRUE ~ NA_character_
+  ))
+```
+
+## Creación de variable primer diagnóstico con el fin de agrupar diagnósticos más prevalentes en unidad de paciente critico y su mortalidad.
+
+```{r}
+# tipo_cancer: First cancer group identified per patient, based on ICD-10 codes grouped by anatomical/clinical classification. Patients with ill-defined, in situ, or uncertain behavior codes are retained in the dataset but may be excluded from summaries or visualizations for interpretability. 
+
+diagnosticos_largos <- data_pacientes %>%
+  select(cip_encriptado, diagnostico1:diagnostico35) %>%
+  pivot_longer(
+    cols = starts_with("diagnostico"),
+    names_to = "diagnostico_n",
+    values_to = "codigo_icd10"
+  ) %>%
+  filter(!is.na(codigo_icd10)) %>%
+  mutate(codigo_prefix = str_sub(codigo_icd10, 1, 3))
+
+# Join to classify cancer type
+diagnosticos_cancer <- diagnosticos_largos %>%
+  left_join(cancer_icd10_groups, by = c("codigo_prefix" = "codigo")) %>%
+  filter(!is.na(cancer_group))
+
+primer_cancer_por_paciente <- diagnosticos_cancer %>%
+  arrange(cip_encriptado, diagnostico_n) %>%
+  group_by(cip_encriptado) %>%
+  slice(1) %>%
+  ungroup()
+
+# join back the first cancer diagnosis (renamed for clarity)
+data_pacientes <- data_pacientes %>%
+  left_join(
+    primer_cancer_por_paciente %>%
+      select(cip_encriptado, primer_diag_cancer = cancer_group),
+    by = "cip_encriptado"
+  ) %>%
+  mutate(
+    diagnostico_cancer = if_else(
+      !is.na(primer_diag_cancer),
+      "oncologico",
+      "no_oncologico"
+    )
+  )
+
+data_pacientes %>%
+  count(primer_diag_cancer, sort = TRUE)
+
+# Define which cancer groups to exclude
+grupo_tumor_inespecifico <- c("Ill-defined/secondary/unspecified", 
+                        "Tumors in situ", 
+                        "Tumors uncertain behavior")
+```
+
+## Creación de variable mortalidad EN unidad de paciente crítico.
+
+```{r}
+# --------------------------------------------
+# CPU-Related Mortality Identification Variables
+# Creates: mortalidad_upc, mortalidad_upc_ingreso, mortalidad_upc_traslado
+# --------------------------------------------
+
+# Identification of CPU-related deaths via admission and transfer records
+
+# Mortality in Cases with CPU as Entry Unit
+mortalidad_upc_ingreso <- data_pacientes %>%
+  mutate(
+    mortalidad_upc = servicioingreso %in% upc_units & 
+                     tipoalta_grupo == "FALLECIDO"
+  ) %>%
+  filter(mortalidad_upc)
+
+mortalidad_upc_ingreso %>%  count(mortalidad_upc)
+
+# Mortality in Cases with CPU as Final Transfer Unit
+
+mortalidad_upc_traslado <- data_pacientes %>% 
+  filter(!cip_encriptado %in% mortalidad_upc_ingreso$cip_encriptado) %>% 
+  select(cip_encriptado, fecha_ingreso, tipoalta_grupo, starts_with("serviciotraslado")) %>%   pivot_longer(cols = starts_with("serviciotraslado")) %>%
+  mutate(orden = str_extract(name, "\\d+") %>% as.numeric()) %>% 
+  filter(!is.na(value)) %>%
+  group_by(cip_encriptado) %>% 
+  slice_max(orden) %>% 
+  ungroup() %>%
+  filter(tipoalta_grupo == "FALLECIDO", value %in% upc_units)
+
+nrow(mortalidad_upc_traslado)
+
+data_pacientes <- data_pacientes %>% 
+  mutate(
+    mortalidad_upc = cip_encriptado %in% c(mortalidad_upc_traslado$cip_encriptado,
+                                          mortalidad_upc_ingreso$cip_encriptado),
+    mortalidad_upc_traslado = cip_encriptado %in% mortalidad_upc_traslado$cip_encriptado,
+    mortalidad_upc_ingreso  = cip_encriptado %in% mortalidad_upc_ingreso$cip_encriptado
+  )
+
+
+data_pacientes %>%  
+  count(upc,
+        mortalidad_upc,
+        mortalidad_upc_traslado,
+        mortalidad_upc_ingreso)
+```
+
+## Guardar rdata por año para luego combinarlos.
+```{r}
+data_eventos
+data_pacientes
+
+saveRDS(data_pacientes, file = paste0("03_rdata/data_pacientes_", .anio, ".rds"))
+```

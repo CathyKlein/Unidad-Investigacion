@@ -1,0 +1,29 @@
+---
+title: "02_combine_GRD"
+format: html
+editor: visual
+---
+
+## Load all the datasets resulting from step 01 and merge them into a single dataframe.
+
+```{r}
+library(purrr)
+library(glue)
+library(readr)
+library(dplyr)
+library(arrow)
+
+years <- 2019:2023 # vector
+
+# Automate the repetition
+# map_dfr() applies a function to each element of a list or vector (like years) 
+# and automatically combines the results into one dataframe (_dfr stands for dataframe row-bind).
+# glue() permite construir cadenas de texto (strings) que incluyen código de R incrustado dentro.
+
+data_integrada <- map_dfr(years, ~ {
+  read_rds(glue::glue("03_rdata/data_pacientes_{.x}.rds")) %>%
+    mutate(año = .x)
+})
+
+arrow::write_parquet(data_integrada, "03_rdata/data_pacientes.parquet")
+```

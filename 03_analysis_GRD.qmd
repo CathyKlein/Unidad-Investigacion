@@ -1,0 +1,427 @@
+## Explorar datos con df integrado
+
+```{r}
+
+library(dplyr)
+library(arrow)
+library(purrr)
+library(stringr)
+library(janitor)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+
+data_integrada <- arrow::read_parquet("03_rdata/data_integrada.parquet") #Integrated dataset
+
+```
+
+## Analisis descriptivo e inferencial demográfico usando datos integrados 2019-2023.
+```{r}
+# Demographic analysis adapted to integrate año nominal as variable. 
+
+# Distribution by age_groups between años of GRD.
+
+# CPU distribution in data_integrada
+data_integrada %>%
+  group_by(año, upc) %>%
+  count() %>%
+  mutate(pct = round(100 * n / sum(n), 2)) %>%
+  ungroup()
+
+#CPU distribution by cancer/no_cancer
+data_integrada %>%
+  count(año, upc, diagnostico_cancer) %>%
+  group_by(año, upc) %>%
+  mutate(pct = round(100 * n / sum(n), 2)) %>%
+  ungroup()
+
+# Distribution of type of cancer between non CPU and CPU patients with cancer
+data_integrada %>%
+  filter(diagnostico_cancer == "oncologico") %>%
+  count(año, upc, tumor_tipo) %>%
+  group_by(año, upc) %>%
+  mutate(pct = round(100 * n / sum(n), 2)) %>%
+  ungroup()
+
+# Mean age (SD) for cancer and no_cancer patients admitted into CPU
+data_integrada %>%
+  filter(edad >= 15, upc == TRUE) %>%
+  group_by(año, diagnostico_cancer) %>%
+  summarise(
+    mean_age = round(mean(edad, na.rm = TRUE), 2),
+    sd_age = round(sd(edad, na.rm = TRUE), 2),
+    .groups = "drop"
+  )
+
+# Compare mean age between cancer and non-cancer patients for each year separately
+data_integrada %>%
+  filter(edad >= 15, upc == TRUE) %>%
+  group_by(año) %>%
+  summarise(
+    p_value = t.test(edad ~ diagnostico_cancer)$p.value,
+    mean_onco = mean(edad[diagnostico_cancer == "oncologico"], na.rm = TRUE),
+    mean_no_onco = mean(edad[diagnostico_cancer == "no_oncologico"], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Test main effects and interaction of diagnostico_cancer and año on edad.
+anova_model <- aov(
+  edad ~ diagnostico_cancer * factor(año),
+  data = data_integrada %>% filter(edad >= 15, upc == TRUE)
+)
+summary(anova_model)
+
+
+# Distribution of CPU by age groups
+data_integrada %>%
+  filter(upc == TRUE) %>%
+  count(año, diagnostico_cancer, grupo_edad) %>%
+  group_by(año, diagnostico_cancer) %>%
+  mutate(
+    pct = round(100 * n / sum(n), 2)
+  ) %>%
+  ungroup()
+
+# Bivariate analysis of age groups among cancer and non cancer patients admitted to CPU
+chisq.test(
+  data_integrada %>%
+    filter(upc == TRUE, año == 2020) %>% # year in study
+    count(grupo_edad, diagnostico_cancer) %>%
+    tidyr::pivot_wider(
+      names_from = diagnostico_cancer,
+      values_from = n,
+      values_fill = 0
+    ) %>%
+    column_to_rownames("grupo_edad") %>%
+    as.matrix()
+)
+
+# Compare distribution between years
+chisq.test(
+  data_integrada %>%
+    filter(upc == TRUE, diagnostico_cancer == "oncologico") %>%
+    count(año, grupo_edad) %>%
+    tidyr::pivot_wider(
+      names_from = año,
+      values_from = n,
+      values_fill = 0
+    ) %>%
+    column_to_rownames("grupo_edad") %>%
+    as.matrix()
+)
+
+# Distribution of cancer/no cancer patients in CPU between sex, DESCONOCIDO values not shown.
+data_integrada %>%
+  filter(upc == TRUE, sexo != "DESCONOCIDO") %>%
+  count(año, diagnostico_cancer, sexo) %>%
+  group_by(año, diagnostico_cancer) %>%
+  mutate(pct = round(100 * n / sum(n), 2)) %>%
+  ungroup()
+  
+# 1. To compare sex distribution between cancer and non-cancer patients within a specific year
+chisq.test(
+  data_integrada %>%
+    filter(upc == TRUE, sexo != "DESCONOCIDO", año == 2020) %>% # year of analysis
+    count(sexo, diagnostico_cancer) %>%
+    pivot_wider(
+      names_from  = diagnostico_cancer,
+      values_from = n,
+      values_fill = 0
+    ) %>%
+    column_to_rownames("sexo") %>%
+    as.matrix()
+)
+
+# 2. To compare distribution of sexes across years (within one group, e.g., oncologic patients)
+chisq.test(
+  data_integrada %>%
+    filter(upc == TRUE, sexo != "DESCONOCIDO", diagnostico_cancer == "oncologico") %>%
+    count(año, sexo) %>%
+    pivot_wider(
+      names_from  = año,
+      values_from = n,
+      values_fill = 0
+    ) %>%
+    column_to_rownames("sexo") %>%
+    as.matrix()
+)
+
+# Distribution of nationalities among cancer/ non cancer patients in CPU
+data_integrada %>%
+  filter(upc == TRUE) %>%
+  count(año, diagnostico_cancer, nacionalidad_dico) %>%
+  group_by(diagnostico_cancer) %>%
+  mutate(
+    pct = round(100 * n / sum(n), 2)
+  ) %>%
+  ungroup()
+
+chisq.test(
+  data_integrada %>%
+    filter(upc == TRUE, año == 2020) %>% # Add each nationality and compare values
+    count(nacionalidad_dico, diagnostico_cancer) %>%
+    pivot_wider(
+      names_from = diagnostico_cancer,
+      values_from = n,
+      values_fill = 0
+    ) %>%
+    column_to_rownames("nacionalidad_dico") %>%
+    as.matrix()
+)
+
+# Analysis of cancer/no cancer patients in CPU by Region - DESCONOCIDO values removed 
+unique(data_integrada$region)
+
+data_integrada %>%
+  filter(upc == TRUE, !is.na(region)) %>%
+  count(año, region, diagnostico_cancer) %>%
+  group_by(año, region) %>%
+  mutate(pct = round(100 * n / sum(n), 2)) %>%
+  ungroup() %>%
+  print(n = Inf)
+
+chisq.test(
+  data_integrada %>%
+    filter(upc == TRUE, !is.na(region)) %>%
+    count(region, diagnostico_cancer) %>%
+    pivot_wider(names_from = diagnostico_cancer, values_from = n, values_fill = 0) %>%
+    column_to_rownames("region") %>%
+    as.matrix()
+) 
+
+# To compare changes in distribution across years we loop by regions (example provided for metropolitan region) and test whether the proportion of cancer vs. non-cancer changes by year.
+chisq.test(
+  data_integrada %>%
+    filter(upc == TRUE, region == "Metropolitana") %>%
+    count(año, diagnostico_cancer) %>%
+    pivot_wider(names_from = año, values_from = n, values_fill = 0) %>%
+    column_to_rownames("diagnostico_cancer") %>%
+    as.matrix()
+)
+
+
+# Rate-adjusted comparison of ICU usage across regions, standardized by population, and broken down by cancer status.
+
+data_integrada %>%
+  filter(upc == TRUE, !is.na(region), !is.na(poblacion_region)) %>%
+  count(año, region, diagnostico_cancer) %>%
+  left_join(
+    data_integrada %>%
+      select(año, region, poblacion_region) %>%
+      distinct(),
+    by = c("año", "region")
+  ) %>%
+  mutate(
+    tasa_100k = round((n / poblacion_region) * 100000, 2)
+  ) %>%
+  select(año, region, diagnostico_cancer, tasa_100k) %>%
+  print(n = Inf)
+
+```
+
+## Análisis de mortalidad hospitalaria y UPC de datos integrados 2019-2023
+
+```{r}
+# Mortality analysis by years on study
+# Calculate overall mortality
+data_integrada %>%
+  group_by(año) %>%
+  summarise(
+    total_pacientes = n(),
+    fallecidos = sum(tipoalta_grupo == "FALLECIDO", na.rm = TRUE),
+    mortalidad_hospitalaria = round(100 * fallecidos / total_pacientes, 2),
+    .groups = "drop"
+  )
+
+# Among all patients who died, how many were oncologic vs. non_oncologic
+data_integrada %>%
+  filter(tipoalta_grupo == "FALLECIDO") %>%
+  count(año, diagnostico_cancer) %>%
+  group_by(año) %>%
+  mutate(pct = round(100 * n / sum(n), 1)) %>%
+  ungroup()
+
+# Overall mortality rate within each group (hospital level)
+# “Within each group (oncologic and non-oncologic), what percentage of patients died?”
+data_integrada %>%
+  group_by(año, diagnostico_cancer) %>%
+  summarise(
+    total = n(),
+    fallecidos = sum(tipoalta_grupo == "FALLECIDO", na.rm = TRUE),
+    mortalidad_pct = round(100 * fallecidos / total, 1),
+    .groups = "drop"
+  )
+
+# Chi2 test per year to analyze whether cancer vs. non-cancer patients have significantly different hospital mortality rates
+
+data_integrada %>%
+  mutate(fallecido = tipoalta_grupo == "FALLECIDO") %>%
+  count(diagnostico_cancer, fallecido) %>%
+  pivot_wider(
+    names_from = fallecido,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  column_to_rownames("diagnostico_cancer") %>%
+  as.matrix() %>%
+  chisq.test()
+
+# Mortality trends over time (all patients) using logistic regression
+glm(
+  fallecido ~ factor(año),
+  data = data_integrada %>%
+    mutate(fallecido = tipoalta_grupo == "FALLECIDO"),
+  family = binomial
+) %>% summary()
+
+# Mortality Distribution in CPU-Exposed Patients, NA values not shown.
+data_integrada %>%
+  filter(upc == TRUE, tipoalta_grupo != "DESCONOCIDO") %>%
+  count(año, diagnostico_cancer, tipoalta_grupo) %>%
+  group_by(año, diagnostico_cancer) %>%
+  mutate(pct = round(100 * n / sum(n), 1)) %>%
+  ungroup()
+
+# Mortality trends over time (all patients) using logistic regression in CPU patients.
+
+glm(
+  mortalidad_upc ~ factor(año),
+  data = data_integrada %>% filter(upc == TRUE),
+  family = binomial
+) %>% summary()
+
+
+# Mortality Within ICU According to Cancer Status
+data_integrada %>%
+  count(año, diagnostico_cancer, mortalidad_upc) %>%
+  group_by(año, diagnostico_cancer) %>%
+  mutate(p = round(100 * n / sum(n), 1)) %>%
+  ungroup()
+
+# Mortality trends over time in CPU patients for cancer and non cancer patients using logistic regression.
+
+glm(
+  mortalidad_upc ~ factor(año),
+  data = data_integrada %>% 
+    filter(upc == TRUE, diagnostico_cancer == "oncologico"),
+  family = binomial
+) %>% summary()
+
+glm(
+  mortalidad_upc ~ factor(año),
+  data = data_integrada %>% 
+    filter(upc == TRUE, diagnostico_cancer == "no_oncologico"),
+  family = binomial
+) %>% summary()
+
+# Distribution of sex among patients who died in CPU (excluding ‘DESCONOCIDO’ values)
+
+data_integrada %>%
+  filter(mortalidad_upc == TRUE, sexo != "DESCONOCIDO") %>%
+  count(año, diagnostico_cancer, sexo) %>%
+  group_by(año, diagnostico_cancer) %>%
+  mutate(p = round(n / sum(n) * 100, 2)) %>%
+  ungroup()
+
+# Compare mortality among sexes for cancer/non_cancer patients who died in CPU between years
+# Logistic regression
+
+glm(
+  sexo == "MUJER" ~ diagnostico_cancer * factor(año),
+  data = data_integrada %>% 
+    filter(mortalidad_upc == TRUE, sexo != "DESCONOCIDO"),
+  family = binomial
+) %>% summary()
+
+```
+
+## Análisis por top 5 tipos de cáncer más prevalentes en UPC y mortalidad asociada 2019-2023
+```{r}
+# Cancer analysis based on top 5 types of cancer (excluding rare types and ill defined for visualization purposes)
+
+# Top 5 most frequent cancer groups (excluding inespecíficos) globally considering all years
+top5_groups <- data_integrada %>%
+  filter(
+    diagnostico_cancer == "oncologico",
+    !primer_diag_cancer %in% grupo_tumor_inespecifico
+  ) %>%
+  count(primer_diag_cancer, sort = TRUE) %>%
+  slice_head(n = 5) %>%
+  pull(primer_diag_cancer)
+
+# 2. Distribution table for top 5 (still allows nonspecific in the rest of the data) but filtering by year
+dist_top5_año <- data_integrada %>%
+  filter(primer_diag_cancer %in% top5_groups) %>%
+  count(año, primer_diag_cancer, upc) %>%
+  group_by(año, primer_diag_cancer) %>%
+  mutate(pct = round(100 * n / sum(n), 1)) %>%
+  ungroup()
+
+# Mortality by cancer type
+top5_mortalidad_upc <- data_integrada %>%
+  filter(
+    upc == TRUE,
+    primer_diag_cancer %in% top5_groups
+  ) %>%
+  group_by(año, primer_diag_cancer) %>%
+  summarise(
+    total_upc = n(),
+    fallecidos_upc = sum(mortalidad_upc, na.rm = TRUE),
+    pct_mortalidad_upc = round(100 * fallecidos_upc / total_upc, 1),
+    .groups = "drop"
+  )
+
+```
+
+
+## Gráficos
+
+```{r}
+# Some graphs using integrated data 
+
+datos_grafico <- data_bind  %>%  
+  select(anio, upc, region, poblacion_region) %>%  
+  filter(upc) %>%  
+  filter(!is.na(region)) %>%  
+  group_by(anio, region) %>%  
+  summarize(upc = n(),
+            poblacion_region = first(poblacion_region)) %>%  
+  mutate(tasa = (upc/poblacion_region)*100000)
+
+datos_grafico %>%  
+  mutate(region = forcats::fct_reorder(region, tasa)) %>%  
+  ggplot() +
+  aes(x = tasa,
+      y = region,
+      fill = as.factor(anio)) +
+  geom_col(width = 0.7,
+           position = position_dodge()) +
+  geom_text(aes(label = round(tasa, 1)),
+            hjust = 1, color = "white", nudge_x = -20) +
+  theme_minimal() +
+  scale_x_continuous(expand = expansion(c(0, 0.05))) +
+  scale_y_discrete(labels = label_wrap_gen(35)) +
+  theme(panel.grid.major.y = element_blank())
+
+datos_grafico %>%  
+  mutate(region = forcats::fct_reorder(region, tasa)) %>%  
+  ggplot() +
+  aes(x = tasa,
+      y = region,
+      fill = as.factor(anio)) +
+  geom_col(width = 0.7,
+           position = position_dodge()) +
+  geom_text(aes(label = round(tasa, 1)),
+            hjust = 1, color = "white", nudge_x = -20) +
+  theme_minimal() +
+  scale_x_continuous(expand = expansion(c(0, 0.05))) +
+  scale_y_discrete(labels = label_wrap_gen(35)) +
+  theme(panel.grid.major.y = element_blank()) +
+  facet_wrap(~anio, nrow = 1)
+
+ggsave(paste0("05_figures/tasa_upc_region_anios.png"))
+```
+
+
+
+
